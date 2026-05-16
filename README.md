@@ -36,9 +36,15 @@ The SHL Recommender Agent utilizes a **Retrieval-Augmented Generation (RAG)** ar
 3. **Configure Environment Variables**
    Create a `.env` file based on the `.env.example`:
    ```env
+   # LLM Provider
    LLM_PROVIDER=groq
    GROQ_API_KEY=your_api_key_here
    GROQ_MODEL=llama-3.3-70b-versatile
+   
+   # Embedding and Index configuration
+   EMBEDDING_MODEL=sentence-transformers/all-MiniLM-L6-v2
+   FAISS_INDEX_PATH=data/faiss_index
+   CATALOG_PATH=data/catalog.json
    ```
 
 4. **Build the Vector Index**
@@ -54,6 +60,45 @@ The SHL Recommender Agent utilizes a **Retrieval-Augmented Generation (RAG)** ar
 
 6. **Test the API**
    Open your browser and navigate to `http://127.0.0.1:8000/docs` to use the interactive Swagger UI.
+
+## Usage & API Reference
+
+The application exposes a single functional POST endpoint for conversation at `/chat`.
+
+### Sample Query
+```bash
+curl -X POST "https://shl-recommender-0kcr.onrender.com/chat" \
+     -H "Content-Type: application/json" \
+     -d '{
+           "messages": [
+             {
+               "role": "user",
+               "content": "We need to evaluate candidates for an entry-level call center position. It involves handling irate customers and basic data entry. What should we use?"
+             }
+           ]
+         }'
+```
+
+### Response Format
+The API responds with a structured JSON object containing a conversational reply and a strict array of valid SHL products.
+```json
+{
+  "reply": "For an entry-level call center position handling irate customers and data entry, I recommend the Customer Service Phone Simulation and Data Entry Alphanumeric Split Screen - US assessments...",
+  "recommendations": [
+    {
+      "name": "Customer Service Phone Simulation",
+      "url": "https://www.shl.com/products/product-catalog/view/customer-service-phone-simulation/",
+      "test_type": "S"
+    },
+    {
+      "name": "Data Entry Alphanumeric Split Screen - US",
+      "url": "https://www.shl.com/products/product-catalog/view/data-entry-alphanumeric-split-screen-us/",
+      "test_type": "S"
+    }
+  ],
+  "end_of_conversation": false
+}
+```
 
 ## Deployment
 This project is configured for seamless deployment on [Render](https://render.com/). 
