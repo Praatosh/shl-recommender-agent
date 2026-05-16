@@ -26,7 +26,7 @@ from typing import AsyncGenerator
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, RedirectResponse
 
 from app.config import get_settings
 from app.schemas import ChatRequest, ChatResponse, HealthResponse
@@ -117,6 +117,11 @@ app.add_middleware(
 # ============================================================
 # API Endpoints
 # ============================================================
+
+@app.get("/", include_in_schema=False)
+async def root():
+    """Redirect base URL to the Swagger documentation."""
+    return RedirectResponse(url="/docs")
 
 @app.get("/health", response_model=HealthResponse, tags=["System"])
 async def health_check():
