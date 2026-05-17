@@ -39,24 +39,28 @@ GREETING_PATTERNS = [
 ]
 
 CONFIRMATION_PATTERNS = [
-    r"\b(perfect|that'?s? (it|what we need|great)|lock(ing)?( it)? in|confirmed?|done|yes,?\s*(that'?s?|go ahead)|good|approved)\b",
+    r"\b(perfect|that'?s? (it|what we need|great)|lock(ing)?( it)? in|confirmed?|done|yes,?\s*(that'?s?|go ahead)|approved)\b",
     r"^(yes|yep|yeah|sure|ok|okay|looks good|works for me|that works)\b",
+    r"\b(locking it in|let'?s go with (this|that|these)|finalize)\b",
 ]
 
 OFF_TOPIC_PATTERNS = [
     r"\b(weather|recipe|joke|poem|story|sing|dance|politics|religion)\b",
     r"\b(ignore previous|forget your instructions|you are now|act as|pretend)\b",
     r"\b(what is your system prompt|reveal your instructions)\b",
+    r"\b(write me a|generate a|create a)\s+(poem|story|essay|code|script)\b",
 ]
 
 COMPARISON_PATTERNS = [
     r"\b(compare|comparison|differ(ence|ent)|vs\.?|versus|which (is|one))\b",
     r"\b(what'?s? the difference|how (do|does) .+ differ)\b",
+    r"\b(do we really need|is .+ the right|is .+ necessary)\b",
 ]
 
 REFINE_PATTERNS = [
     r"\b(add|include|also (add|include)|drop|remove|swap|replace|change|switch)\b",
     r"\b(instead of|rather than|can you (add|remove|drop|replace))\b",
+    r"\b(keep .+ but|remove .+ and add)\b",
 ]
 
 
@@ -168,6 +172,42 @@ class ConversationAnalyzer:
                     return {
                         "intent": "confirm",
                         "search_queries": [],
+                        "needs_clarification": False,
+                        "is_sufficient_context": True,
+                        "role_or_domain": "",
+                        "seniority_level": "",
+                        "technologies": [],
+                        "assessment_types_wanted": [],
+                        "constraints": [],
+                        "refinement_action": "none",
+                        "assessments_to_add": [],
+                        "assessments_to_remove": [],
+                    }
+
+            # Check for refinement after recommendations
+            for pattern in REFINE_PATTERNS:
+                if re.search(pattern, latest_lower, re.IGNORECASE):
+                    return {
+                        "intent": "refine",
+                        "search_queries": [latest],
+                        "needs_clarification": False,
+                        "is_sufficient_context": True,
+                        "role_or_domain": "",
+                        "seniority_level": "",
+                        "technologies": [],
+                        "assessment_types_wanted": [],
+                        "constraints": [],
+                        "refinement_action": "add",
+                        "assessments_to_add": [],
+                        "assessments_to_remove": [],
+                    }
+
+            # Check for comparison after recommendations
+            for pattern in COMPARISON_PATTERNS:
+                if re.search(pattern, latest_lower, re.IGNORECASE):
+                    return {
+                        "intent": "compare",
+                        "search_queries": [latest],
                         "needs_clarification": False,
                         "is_sufficient_context": True,
                         "role_or_domain": "",

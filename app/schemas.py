@@ -11,6 +11,8 @@ the LLM output is always schema-compliant before it reaches the client.
 from typing import List, Optional
 from pydantic import BaseModel, Field, field_validator
 
+from app.utils import derive_test_type_code
+
 
 class ChatMessage(BaseModel):
     """A single message in the conversation history."""
@@ -95,7 +97,7 @@ class CatalogItem(BaseModel):
     def get_test_type_code(self) -> str:
         """
         Derive test type code from assessment keys.
-        Maps SHL key categories to single-letter codes used in the API response.
+        Delegates to the shared utility function for consistency.
         
         Mapping:
         - Knowledge & Skills -> K
@@ -107,21 +109,7 @@ class CatalogItem(BaseModel):
         - Assessment Exercises -> E
         - Development & 360 -> D
         """
-        type_map = {
-            "Knowledge & Skills": "K",
-            "Personality & Behavior": "P",
-            "Ability & Aptitude": "A",
-            "Simulations": "S",
-            "Biodata & Situational Judgment": "B",
-            "Competencies": "C",
-            "Assessment Exercises": "E",
-            "Development & 360": "D",
-        }
-        codes = []
-        for key in self.keys:
-            if key in type_map and type_map[key] not in codes:
-                codes.append(type_map[key])
-        return ",".join(codes) if codes else "K"
+        return derive_test_type_code(self.keys)
 
     def to_search_text(self) -> str:
         """

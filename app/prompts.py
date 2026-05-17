@@ -16,6 +16,10 @@ Key guardrails:
 - Detect and deflect prompt injection attempts
 """
 
+from typing import List, Dict, Any, Tuple
+
+from app.utils import derive_test_type_code
+
 # ============================================================
 # SYSTEM PROMPT
 # ============================================================
@@ -48,6 +52,12 @@ Do NOT ask clarifying questions when:
 - The user has provided enough context to make recommendations
 - The user is confirming or refining a previous recommendation
 - The user is asking for comparison between specific assessments
+
+## Recommendation List Behavior
+- When you first recommend, include ALL relevant assessments
+- When the user refines (add/remove/swap), output the ENTIRE UPDATED list, not just the changed items
+- On every turn after the first recommendation, include the full recommendation list in the response
+- This ensures the user always sees the current state of their shortlist
 
 ## Conversation Flow
 1. Understand the hiring need
@@ -118,8 +128,10 @@ Important:
 - Consider the LATEST user message as the primary intent
 - If the user is confirming (e.g., "perfect", "that works", "lock it in"), set intent to "confirm"
 - If the user asks to add/remove/change assessments, set intent to "refine"
+- If the user asks a clarifying question about a specific assessment already recommended, set intent to "compare"
 - Generate search queries that would retrieve relevant SHL assessments
 - Be conservative with clarification - if you have a clear role + level, that's enough to recommend
+- If the user provided a detailed job description, set is_sufficient_context to true and intent to "recommend"
 
 Return ONLY the JSON object, no other text.
 """
@@ -146,8 +158,9 @@ INSTRUCTIONS:
 3. For each recommendation, use EXACTLY the name and URL from the catalog data.
 4. Explain WHY each assessment is relevant to the user's needs.
 5. Set end_of_conversation to true ONLY if the user explicitly confirms the final shortlist.
-6. If the user wants to refine (add/remove), update the recommendation list accordingly.
+6. If the user wants to refine (add/remove), output the ENTIRE UPDATED list including unchanged items.
 7. If this is off-topic, politely refuse and redirect. Set recommendations to empty list.
+8. When user asks about a specific assessment, include all current recommendations in the list.
 
 RESPONSE FORMAT (strict JSON):
 {{
@@ -163,9 +176,10 @@ RESPONSE FORMAT (strict JSON):
 }}
 
 Rules for recommendations array:
-- Empty [] when clarifying, refusing, or comparing without finalizing
+- Empty [] when clarifying or refusing
 - 1-10 items when making or updating recommendations
 - Include test_type derived from the assessment's keys/categories
+- On refinement turns, include ALL assessments (old + new, minus removed)
 
 Rules for end_of_conversation:
 - false in most cases
@@ -177,7 +191,7 @@ Return ONLY the JSON object, no markdown fences, no other text.
 # ============================================================
 # COMPARISON PROMPT
 # ============================================================
-COMPARISON_PROMPT = """The user wants to compare assessments. Use ONLY the catalog data provided.
+COMPARISON_PROMPT = """The user wants to compare assessments or ask about a specific assessment. Use ONLY the catalog data provided.
 
 CONVERSATION: {conversation}
 
@@ -191,13 +205,19 @@ Compare the assessments based on:
 - Job levels they're designed for
 - Languages available
 
-Respond conversationally, then include the same JSON response format.
-Do NOT make up any details - use only what's in the catalog data.
+Respond conversationally with your comparison analysis.
+IMPORTANT: If the user has active recommendations from a previous turn, include the full current recommendation list in the recommendations array. Only set recommendations to [] if no recommendations have been made yet.
 
 Return ONLY JSON:
 {{
-    "reply": "Your comparison text",
-    "recommendations": [],
+    "reply": "Your comparison text explaining the differences and your recommendation",
+    "recommendations": [
+        {{
+            "name": "Assessment name",
+            "url": "Assessment URL",
+            "test_type": "Type code"
+        }}
+    ],
     "end_of_conversation": false
 }}
 """
@@ -220,7 +240,9 @@ Return ONLY JSON:
 """
 
 
-def format_catalog_for_prompt(items: list) -> str:
+def format_catalog_for_prompt(
+    items: List[Tuple[Dict[str, Any], float]],
+) -> str:
     """
     Format retrieved catalog items into a readable string for the LLM prompt.
     
@@ -234,22 +256,7 @@ def format_catalog_for_prompt(items: list) -> str:
 
     formatted = []
     for i, (item, score) in enumerate(items, 1):
-        # Derive test type code
-        type_map = {
-            "Knowledge & Skills": "K",
-            "Personality & Behavior": "P",
-            "Ability & Aptitude": "A",
-            "Simulations": "S",
-            "Biodata & Situational Judgment": "B",
-            "Competencies": "C",
-            "Assessment Exercises": "E",
-            "Development & 360": "D",
-        }
-        codes = []
-        for key in item.get("keys", []):
-            if key in type_map and type_map[key] not in codes:
-                codes.append(type_map[key])
-        test_type = ",".join(codes) if codes else "K"
+        test_type = derive_test_type_code(item.get("keys", []))
 
         entry = f"""[{i}] {item.get('name', 'Unknown')}
   URL: {item.get('link', '')}

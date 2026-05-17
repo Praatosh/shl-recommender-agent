@@ -83,14 +83,28 @@ class LLMClient:
         """
         self._ensure_client()
 
-        try:
-            if self._provider == "gemini":
-                return self._generate_gemini(system_prompt, user_prompt, temperature, max_tokens)
-            elif self._provider == "groq":
-                return self._generate_groq(system_prompt, user_prompt, temperature, max_tokens)
-        except Exception as e:
-            logger.error(f"LLM generation failed: {e}")
-            raise
+        last_error = None
+        for attempt in range(3):
+            try:
+                if self._provider == "gemini":
+                    return self._generate_gemini(system_prompt, user_prompt, temperature, max_tokens)
+                elif self._provider == "groq":
+                    return self._generate_groq(system_prompt, user_prompt, temperature, max_tokens)
+            except Exception as e:
+                last_error = e
+                error_str = str(e).lower()
+                # Retry on rate limit errors with exponential backoff
+                if "rate_limit" in error_str or "429" in error_str or "rate limit" in error_str:
+                    import time
+                    wait = 2 ** (attempt + 1)
+                    logger.warning(f"Rate limit hit (attempt {attempt + 1}/3), waiting {wait}s...")
+                    time.sleep(wait)
+                    continue
+                logger.error(f"LLM generation failed: {e}")
+                raise
+
+        logger.error(f"LLM generation failed after 3 retries: {last_error}")
+        raise last_error
 
     def _generate_gemini(
         self, system_prompt: str, user_prompt: str, 

@@ -5,18 +5,67 @@ An intelligent, conversational AI agent designed to help recruiters and hiring m
 ## Overview
 The SHL Recommender Agent utilizes a **Retrieval-Augmented Generation (RAG)** architecture. It embeds the entire SHL product catalog using Sentence Transformers and stores it in a local FAISS vector database. When a user asks a question, the system retrieves the most relevant products and uses a Groq-hosted Large Language Model (`llama-3.3-70b-versatile`) to generate a conversational, context-aware recommendation without hallucinations.
 
+## Architecture
+
+```
+User Request (full conversation history)
+       ↓
+  FastAPI Endpoint (/chat)
+       ↓
+  Conversation Analyzer (Regex fast-path + LLM deep analysis)
+       ↓
+  Intent Router → greeting | off_topic | confirm | compare | refine | recommend
+       ↓
+  FAISS Vector Search (multi-query, cosine similarity)
+       ↓
+  LLM Grounded Generation (JSON mode, catalog-only)
+       ↓
+  Post-Generation Validation (URL check, schema enforcement)
+       ↓
+  Structured JSON Response
+```
+
 ## Features
 * **Stateless Chat Interface**: Handles full conversation history to allow follow-up questions and refinements.
-* **Vector Search**: Uses `sentence-transformers/all-MiniLM-L6-v2` and `faiss-cpu` for lightning-fast semantic retrieval of catalog items.
-* **Guardrails**: Prompt engineering prevents the LLM from inventing fake assessments or hallucinating URLs.
+* **Two-Tier Intent Detection**: Regex fast-path for common intents (~0ms) + LLM for complex queries.
+* **Vector Search**: Uses `sentence-transformers/all-MiniLM-L6-v2` and `faiss-cpu` for semantic retrieval.
+* **Multi-Query Search**: LLM decomposes complex queries into multiple search facets for better recall.
+* **Hallucination Prevention**: Post-generation URL validation ensures all recommendations exist in the catalog.
+* **Guardrails**: Prompt injection defense, off-topic refusal, and scope adherence.
+* **Async API**: Non-blocking endpoint using `asyncio.to_thread` for LLM/embedding operations.
 * **Docker Ready**: Fully containerized and ready for cloud deployment.
 
 ## Tech Stack
 * **Framework**: FastAPI, Uvicorn
-* **LLM Provider**: Groq API
-* **Embeddings**: Sentence-Transformers
-* **Vector Store**: FAISS
+* **LLM Provider**: Groq API (Llama 3.3 70B)
+* **Embeddings**: Sentence-Transformers (all-MiniLM-L6-v2)
+* **Vector Store**: FAISS (IndexFlatIP, cosine similarity)
+* **Validation**: Pydantic v2
 * **Deployment**: Docker, Render
+
+## Project Structure
+
+```
+app/
+├── main.py          # FastAPI app with lifespan, middleware, endpoints
+├── config.py        # Centralized configuration via pydantic-settings
+├── schemas.py       # Pydantic models for request/response validation
+├── engine.py        # Recommendation engine (orchestrator)
+├── analyzer.py      # Conversation analyzer (intent detection)
+├── embeddings.py    # FAISS vector store & embedding generation
+├── llm_client.py    # LLM abstraction layer (Gemini/Groq)
+├── prompts.py       # All prompt templates (system, analysis, recommendation)
+├── scraper.py       # Catalog loading & preprocessing
+├── utils.py         # Shared utilities (TYPE_MAP, derive_test_type_code)
+├── logger.py        # Centralized logging configuration
+└── __init__.py
+tests/
+├── test_all.py      # Unit tests (schemas, utils, patterns)
+└── test_evaluation.py  # Live API evaluation script
+data/
+├── catalog.json     # Pre-scraped SHL catalog (~400 assessments)
+└── faiss_index/     # Persisted FAISS index files
+```
 
 ## Local Setup
 
@@ -58,16 +107,26 @@ The SHL Recommender Agent utilizes a **Retrieval-Augmented Generation (RAG)** ar
    uvicorn app.main:app --reload
    ```
 
-6. **Test the API**
-   Open your browser and navigate to `http://127.0.0.1:8000/docs` to use the interactive Swagger UI.
+6. **Run Tests**
+   ```bash
+   python -m pytest tests/test_all.py -v
+   ```
+
+7. **Run Evaluation** (requires running server)
+   ```bash
+   python tests/test_evaluation.py
+   ```
 
 ## Usage & API Reference
 
-The application exposes a single functional POST endpoint for conversation at `/chat`.
-
-### Sample Query
+### Health Check
 ```bash
-curl -X POST "https://shl-recommender-0kcr.onrender.com/chat" \
+curl http://localhost:8000/health
+```
+
+### Chat Endpoint
+```bash
+curl -X POST "http://localhost:8000/chat" \
      -H "Content-Type: application/json" \
      -d '{
            "messages": [
@@ -80,10 +139,9 @@ curl -X POST "https://shl-recommender-0kcr.onrender.com/chat" \
 ```
 
 ### Response Format
-The API responds with a structured JSON object containing a conversational reply and a strict array of valid SHL products.
 ```json
 {
-  "reply": "For an entry-level call center position handling irate customers and data entry, I recommend the Customer Service Phone Simulation and Data Entry Alphanumeric Split Screen - US assessments...",
+  "reply": "For an entry-level call center position handling irate customers and data entry, I recommend...",
   "recommendations": [
     {
       "name": "Customer Service Phone Simulation",
@@ -105,3 +163,11 @@ This project is configured for seamless deployment on [Render](https://render.co
 The included `render.yaml` Blueprint automatically builds the FAISS index during the Docker build process and spins up the FastAPI web service.
 
 Live API Documentation: [https://shl-recommender-0kcr.onrender.com/docs](https://shl-recommender-0kcr.onrender.com/docs)
+
+## Approach Document
+See [APPROACH.md](APPROACH.md) for a detailed explanation of:
+- Architecture decisions
+- Retrieval strategy
+- Prompt engineering
+- Evaluation methodology
+- Tradeoffs and limitations

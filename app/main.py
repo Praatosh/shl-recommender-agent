@@ -13,10 +13,11 @@ Startup sequence:
 5. Start accepting requests
 
 Design choices:
-- Lifespan context manager for clean startup/shutdown
+- Lifespan context manager for clean startup/shutdown (FastAPI best practice)
 - CORS middleware enabled for frontend integration
-- Request logging middleware for debugging
+- Request timing middleware for performance monitoring
 - Error handling with structured error responses
+- Async endpoint with to_thread for blocking operations
 """
 
 import time
@@ -24,7 +25,7 @@ import os
 from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, RedirectResponse
 
@@ -51,6 +52,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     1. Load catalog data
     2. Build or load FAISS index
     3. Initialize recommendation engine
+    
+    Uses lifespan context manager (preferred over on_event decorators)
+    per FastAPI best practices.
     """
     settings = get_settings()
     logger.info("=" * 60)
@@ -115,6 +119,34 @@ app.add_middleware(
 
 
 # ============================================================
+# Request Timing Middleware
+# ============================================================
+@app.middleware("http")
+async def request_timing_middleware(request: Request, call_next):
+    """
+    Log request timing for performance monitoring.
+    
+    Why middleware instead of per-endpoint timing?
+    - Captures ALL requests uniformly, including errors
+    - Includes middleware processing time in the measurement
+    - Follows the FastAPI skill recommendation for middleware-based logging
+    """
+    start_time = time.time()
+    response = await call_next(request)
+    elapsed = time.time() - start_time
+
+    # Only log non-health requests to avoid noise
+    if request.url.path != "/health":
+        logger.info(
+            f"{request.method} {request.url.path} -> {response.status_code} ({elapsed:.2f}s)"
+        )
+
+    # Add timing header for debugging
+    response.headers["X-Response-Time"] = f"{elapsed:.3f}s"
+    return response
+
+
+# ============================================================
 # API Endpoints
 # ============================================================
 
@@ -124,7 +156,7 @@ async def root():
     return RedirectResponse(url="/docs")
 
 @app.get("/health", response_model=HealthResponse, tags=["System"])
-async def health_check():
+async def health_check() -> HealthResponse:
     """
     Health check endpoint.
     Returns service status and version.
@@ -134,7 +166,7 @@ async def health_check():
 
 
 @app.post("/chat", response_model=ChatResponse, tags=["Chat"])
-async def chat(request: ChatRequest):
+async def chat(request: ChatRequest) -> ChatResponse:
     """
     Conversational assessment recommender endpoint.
     
@@ -145,20 +177,19 @@ async def chat(request: ChatRequest):
     - end_of_conversation: True only after final confirmation
     
     The API is stateless - every request must contain the full conversation history.
+    
+    Design note: Uses async handler with to_thread internally to avoid
+    blocking the event loop during LLM API calls and embedding operations.
     """
-    start_time = time.time()
-
     try:
         # Get the recommendation engine
         engine = get_engine()
 
-        # Process the chat
-        response = engine.process_chat(request.messages)
+        # Process the chat asynchronously (wraps blocking calls)
+        response = await engine.process_chat_async(request.messages)
 
-        elapsed = time.time() - start_time
         logger.info(
-            f"Chat processed in {elapsed:.2f}s | "
-            f"Messages: {len(request.messages)} | "
+            f"Chat | Messages: {len(request.messages)} | "
             f"Recommendations: {len(response.recommendations)} | "
             f"EOC: {response.end_of_conversation}"
         )
@@ -166,8 +197,7 @@ async def chat(request: ChatRequest):
         return response
 
     except Exception as e:
-        elapsed = time.time() - start_time
-        logger.error(f"Chat error after {elapsed:.2f}s: {e}", exc_info=True)
+        logger.error(f"Chat error: {e}", exc_info=True)
 
         # Return a graceful error response instead of 500
         return ChatResponse(

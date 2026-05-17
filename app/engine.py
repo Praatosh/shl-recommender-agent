@@ -20,9 +20,19 @@ Design choices:
 2. Intent-based routing: Different intents get different prompts
 3. Grounded generation: LLM only sees retrieved catalog items
 4. Post-generation validation: Ensures URLs exist in catalog
+5. Async support: Uses asyncio.to_thread for blocking LLM/embedding calls
+
+How to improve Recall@10:
+- Use a larger embedding model (e5-large-v2) at the cost of latency
+- Hybrid search: combine dense retrieval with BM25 keyword matching
+- Query expansion: generate multiple query variants from the LLM
+- Use assessment metadata (keys, job_levels) as hard filters before ranking
+- Re-rank results using cross-encoder models
 """
 
 import json
+import asyncio
+import re
 from typing import Dict, Any, List, Optional, Tuple
 
 from app.analyzer import ConversationAnalyzer, get_analyzer
@@ -38,6 +48,7 @@ from app.prompts import (
     format_catalog_for_prompt,
     format_conversation,
 )
+from app.utils import derive_test_type_code
 from app.config import get_settings
 from app.logger import get_logger
 
@@ -61,9 +72,10 @@ class RecommendationEngine:
         self.analyzer = get_analyzer()
         self.vector_store = get_vector_store()
         self.llm = get_llm_client()
-        # Build a URL lookup for validation
+        # Build lookup tables for validation
         self._valid_urls: set = set()
         self._catalog_by_name: Dict[str, Dict] = {}
+        self._catalog_by_url: Dict[str, Dict] = {}
         self._init_catalog_lookup()
 
     def _init_catalog_lookup(self):
@@ -73,8 +85,16 @@ class RecommendationEngine:
             name = item.get("name", "")
             if url:
                 self._valid_urls.add(url)
+                self._catalog_by_url[url] = item
             if name:
                 self._catalog_by_name[name.lower()] = item
+
+    async def process_chat_async(self, messages: List[ChatMessage]) -> ChatResponse:
+        """
+        Async entry point: wraps the synchronous pipeline in asyncio.to_thread
+        to avoid blocking the event loop during LLM/embedding calls.
+        """
+        return await asyncio.to_thread(self.process_chat, messages)
 
     def process_chat(self, messages: List[ChatMessage]) -> ChatResponse:
         """
@@ -88,9 +108,11 @@ class RecommendationEngine:
         # Check conversation length limit
         user_turns = sum(1 for m in msg_dicts if m["role"] == "user")
         if user_turns > self.settings.max_conversation_turns:
+            # Extract any previous recommendations to include in the final response
+            prev_recs = self._extract_previous_recommendations(msg_dicts)
             return ChatResponse(
                 reply="We've reached the maximum conversation length. Here's a summary of our discussion. Feel free to start a new conversation if you need further help!",
-                recommendations=[],
+                recommendations=prev_recs,
                 end_of_conversation=True,
             )
 
@@ -117,7 +139,6 @@ class RecommendationEngine:
 
     def _handle_off_topic(self, messages: list) -> ChatResponse:
         """Handle off-topic or unsafe requests."""
-        latest = messages[-1]["content"] if messages else ""
         return ChatResponse(
             reply="I'm specialized in recommending SHL assessments for hiring and talent management. I'd be happy to help you find the right assessment — what role are you looking to fill?",
             recommendations=[],
@@ -157,7 +178,12 @@ class RecommendationEngine:
     def _handle_comparison(
         self, messages: list, analysis: Dict[str, Any]
     ) -> ChatResponse:
-        """Handle assessment comparison requests."""
+        """
+        Handle assessment comparison requests.
+        
+        Key improvement: comparison turns still emit the full recommendation
+        list (matching sample conversation behavior in C5, C6, C9).
+        """
         # Retrieve items mentioned in the conversation
         search_queries = analysis.get("search_queries", [])
         if not search_queries:
@@ -178,7 +204,20 @@ class RecommendationEngine:
             user_prompt=prompt,
         )
 
-        return self._build_response(result, retrieved)
+        response = self._build_response(result, retrieved)
+
+        # If LLM returned empty recommendations but we have previous ones,
+        # carry them forward (comparison shouldn't lose the shortlist)
+        if not response.recommendations:
+            prev_recs = self._extract_previous_recommendations(messages)
+            if prev_recs:
+                response = ChatResponse(
+                    reply=response.reply,
+                    recommendations=prev_recs,
+                    end_of_conversation=response.end_of_conversation,
+                )
+
+        return response
 
     def _handle_refinement(
         self, messages: list, analysis: Dict[str, Any]
@@ -295,6 +334,10 @@ class RecommendationEngine:
 
             # Validate URL exists in catalog
             if url and url in self._valid_urls:
+                # Use catalog's own data for test_type to ensure accuracy
+                catalog_item = self._catalog_by_url.get(url)
+                if catalog_item:
+                    test_type = derive_test_type_code(catalog_item.get("keys", []))
                 validated_recs.append(
                     AssessmentRecommendation(
                         name=name,
@@ -331,20 +374,7 @@ class RecommendationEngine:
         # Exact match
         if name_lower in self._catalog_by_name:
             item = self._catalog_by_name[name_lower]
-            # Derive test type from catalog if not provided
-            type_map = {
-                "Knowledge & Skills": "K",
-                "Personality & Behavior": "P",
-                "Ability & Aptitude": "A",
-                "Simulations": "S",
-                "Biodata & Situational Judgment": "B",
-                "Competencies": "C",
-                "Assessment Exercises": "E",
-                "Development & 360": "D",
-            }
-            codes = [type_map[k] for k in item.get("keys", []) if k in type_map]
-            catalog_type = ",".join(codes) if codes else test_type
-
+            catalog_type = derive_test_type_code(item.get("keys", []))
             return AssessmentRecommendation(
                 name=item["name"],
                 url=item["link"],
@@ -354,19 +384,7 @@ class RecommendationEngine:
         # Fuzzy match: check if name is a substring
         for cat_name, item in self._catalog_by_name.items():
             if name_lower in cat_name or cat_name in name_lower:
-                type_map = {
-                    "Knowledge & Skills": "K",
-                    "Personality & Behavior": "P",
-                    "Ability & Aptitude": "A",
-                    "Simulations": "S",
-                    "Biodata & Situational Judgment": "B",
-                    "Competencies": "C",
-                    "Assessment Exercises": "E",
-                    "Development & 360": "D",
-                }
-                codes = [type_map[k] for k in item.get("keys", []) if k in type_map]
-                catalog_type = ",".join(codes) if codes else test_type
-
+                catalog_type = derive_test_type_code(item.get("keys", []))
                 return AssessmentRecommendation(
                     name=item["name"],
                     url=item["link"],
@@ -385,7 +403,6 @@ class RecommendationEngine:
         Strategy: Search for SHL URLs in assistant messages
         and match them to catalog items.
         """
-        import re
         recommendations = []
         seen_urls = set()
 
@@ -404,24 +421,12 @@ class RecommendationEngine:
                         # Find matching catalog item
                         for item in self.vector_store.catalog_items:
                             if item.get("link", "").rstrip("/") == url:
-                                type_map = {
-                                    "Knowledge & Skills": "K",
-                                    "Personality & Behavior": "P",
-                                    "Ability & Aptitude": "A",
-                                    "Simulations": "S",
-                                    "Biodata & Situational Judgment": "B",
-                                    "Competencies": "C",
-                                    "Assessment Exercises": "E",
-                                    "Development & 360": "D",
-                                }
-                                codes = [type_map[k] for k in item.get("keys", []) if k in type_map]
-                                test_type = ",".join(codes) if codes else "K"
-
+                                catalog_type = derive_test_type_code(item.get("keys", []))
                                 recommendations.append(
                                     AssessmentRecommendation(
                                         name=item["name"],
                                         url=item["link"],
-                                        test_type=test_type,
+                                        test_type=catalog_type,
                                     )
                                 )
                                 break
